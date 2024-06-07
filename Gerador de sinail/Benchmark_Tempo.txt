@@ -1,0 +1,16 @@
+Simulando 1e8 SIMBOLOS em 4PAM = 2e8 bits
+
+Sinal formatado com rrc e 16 SpS:
+
+Tempo de Geração do sina: 1m e 45s
+Memoria RAM consumida ~= 7 Gb
+
+Salvando  Simbolos + Sinal
+Tempo para salvar: 11.7s
+Tamanho final do arquivo  ~= 7 GB
+Tempo para carregamento das varaiveis: 8.1s
+
+Salvando apenas os Simbolos
+Tempo para salvar: 2.5s
+Tamanho final do arquivo  ~= 781 Mbits
+Tempo para carregamento das varaiveis: 2.2s  

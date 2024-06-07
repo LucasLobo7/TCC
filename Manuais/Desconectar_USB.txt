@@ -1,0 +1,36 @@
+- verificar qual porta o dispositivo está conectado:
+	# python script
+	
+	import subprocess as sp
+	device_name = identifyer
+	out = sp.getoutput(f'lsusb | grep -i {device_name}')
+	# output is like 'Bus 003 Device 017: ID 046d:c52f Logitech, Inc. Unifying Receiver'
+	
+	start = out.find('Device') + len('device') + 1
+	device_number = int(out[start:start+3]) # esse é o número do dispositivo
+	
+	# Terminal: 
+	$ lsusb -t|less # lista os dispositivos e portas
+
+Por exemplo, em
+:  Bus 04.Port 1: Dev 1, Class=root_hub, Driver=xhci_hcd/4p, 10000M
+/:  Bus 03.Port 1: Dev 1, Class=root_hub, Driver=xhci_hcd/12p, 480M
+    |__ Port 1: Dev 17, If 0, Class=Human Interface Device, Driver=usbhid, 12M
+    |__ Port 1: Dev 17, If 1, Class=Human Interface Device, Driver=usbhid, 12M
+
+o dispositivo 17 (Dev 17) está na porta '3-1'. então, executar na linha de comando:
+
+	- metodo 1 - unbind (segundo stackexchange, é o mesmo que puxar o cabo e recolocá-lo)
+		$ echo '3-1'|sudo tee /sys/bus/usb/drivers/usb/unbind
+		para desabilitá-lo e,
+		$ echo '3-1'|sudo tee /sys/bus/usb/drivers/usb/bind
+		para habilitá-lo.
+	
+	-método 2 - power
+		$ echo 0 | sudo tee /sys/bus/usb/devices/3-1/power/autosuspend_delay_ms
+		$ echo auto | sudo tee /sys/bus/usb/devices/3-1/power/control
+		para desabilitá-lo e,
+		$ echo on | sudo tee /sys/bus/usb/devices/3-1/power/control
+		para habilitá-lo.
+
+	
