@@ -11,11 +11,27 @@ import scipy as sp
 from optic.comm.modulation import modulateGray, demodulateGray, GrayMapping
 from optic.dsp.core import firFilter, pulseShape, lowPassFIR, pnorm, upsample
 from optic.comm.metrics import signal_power,fastBERcalc
-
+from numpy.fft import fft, ifft
 from optic.plot import eyediagram
 plt.rcParams["figure.figsize"] = (12,6)
 
 def Gerar_Simbolos(M,nsimbolos,SPS,formatoPulso,nTaps,alpha):
+    ##############################################################
+    # Função para gerar os pontos em PAM para serem enviados para o DAC
+    # Os pontos ja saem escalonados entre -32767 e 32767 (short int, 2 bytes)
+
+    # Parametros:
+    # M (int): Formato de modulação
+    # SPS (int): Amostras por simbolo
+    # formatoPulso (string: rect, nrz, rrc): Formato do pulso
+    # nTaps (int): Numero de taps do filtro rrc
+    # alpha (float: entre 0 e 1): Rooloff do filtro rrc
+
+    # Output:
+    # bits (array numpy): Sequencia de bits gerados aleatoriamente
+    # sinal: Sequencia de pontos formatada
+    ##############################################################
+
     # Geração de simbolos
     bits = np.random.randint(0,2,int(nsimbolos*np.log2(M)))
 
@@ -28,42 +44,62 @@ def Gerar_Simbolos(M,nsimbolos,SPS,formatoPulso,nTaps,alpha):
     pulso = pulso/max(abs(pulso))
     sinal = firFilter(pulso, simbolosup)
     sinal = sinal.real
-    # if formatoPulso == 'rrc':
-    #     np.savez('Dados Gerador De sinal/Python/{}PAM_SPS={}_{}_alpha={}.npz'.format(int(M),int(SPS),formatoPulso,alpha), simbolos=simbolos,sinal=sinal)
-    # else:
-    #     np.savez('Dados Gerador De sinal/Python/{}PAM_SPS={}_{}.npz'.format(int(M),int(SPS),formatoPulso), simbolos=simbolos,sinal=sinal)
-
-    #npz = np.load('{}PAM_SPS={}_{}_aplha={}.npz'.format(int(M),int(SPS),formatoPulso,alpha))
-    #print(npz['simbolos'])
-
-    # Geração do arquivo do DAC
     sinal = sinal - np.min(sinal)
     sinal = sinal/np.max(sinal)*65534
     sinal = sinal - 32767
     sinal = (np.rint(sinal)).astype(int)
     return bits,sinal
 
-def Onda_Dac(DAC,Porta,fs,V_High,V_Low,pontos,filtro):
+def Onda_Dac_Rigol(DAC,Porta,fs,V_High,V_Low,pontos,filtro):
+    ##############################################################
+    # Função para gerar a forma de onda arbitraria no DAC Rigol  dg922 Pro
+
+    # Parametros:
+    # DAC (Objeto do pyvisa relacionado ao DAC)
+    # Porta (int 1 ou 2): Porta que será enviada a sequencia arbitraria
+    # fs (float): Taxa de amostragem do DAC
+    # V_High (float ou int): Amplitude maxima do sinal
+    # V_Low  (float ou int): Amplitude minima do sinal
+    # pontos (array numpy): Sequencia de pontos a ser carregada no DAC
+    # filtro (string: Normal, Insert, Step): Formato de pulso usada no DAC
+    ##############################################################
+
     DAC.write(f':SOURce{Porta}:FUNCtion:SEQuence:STATe ON')
     DAC.write(f':SOURce{Porta}:FUNCtion:SEQuence:LIST:CLEar')
-    tamanhopacote = 300
+    tamanhopacote = 2000
     simboloscortados = np.array_split(pontos,int(np.ceil(len(pontos)/tamanhopacote)))
     if len(simboloscortados) == 1:
-        pontos = np.array2string(simboloscortados[0], separator=', ').translate({ord(j): None for j in '[]'}).replace('\n','')
-        DAC.write(f':SOURce{Porta}:TRACe:DATA:DAC16 CODE,END, {pontos}')
-        DAC.query('*OPC?')
+        pontos = np.ndarray.tolist(simboloscortados[0])
+        try:
+            DAC.write_binary_values(f':SOURce{Porta}:TRACe:DATA:DAC16 BIN,END,', pontos,datatype='h')
+            DAC.query('*OPC?')
+        except:
+                    print('tentando novamente')
+                    DAC.query('*OPC?')
     else:
         for i in range(len(simboloscortados)):
-            pontos = np.array2string(simboloscortados[i], separator=', ').translate({ord(j): None for j in '[]'}).replace('\n','')
+            pontos = simboloscortados[i]
             if i == 0:
-                DAC.write(f':SOURce{Porta}:TRACe:DATA:DAC16 CODE,HEADer, {pontos}')
-                DAC.query('*OPC?')        
+                try:
+                    DAC.write_binary_values(f':SOURce{Porta}:TRACe:DATA:DAC16 BIN,HEADer,', pontos,datatype='h')
+                    DAC.query('*OPC?')       
+                except:
+                    print(f'{i/len(simboloscortados)*100}%')
+                    DAC.query('*OPC?') 
             elif i == len(simboloscortados) - 1:
-                DAC.write(f':SOURce{Porta}:TRACe:DATA:DAC16 CODE,END, {pontos}')
-                DAC.query('*OPC?')
+                try:
+                    DAC.write_binary_values(f':SOURce{Porta}:TRACe:DATA:DAC16 BIN,END,', pontos,datatype='h')
+                    DAC.query('*OPC?')
+                except:
+                    print(f'{i/len(simboloscortados)*100}%')
+                    DAC.query('*OPC?')
             else:
-                DAC.write(f':SOURce{Porta}:TRACe:DATA:DAC16 CODE,CONTinue, {pontos}')
-                DAC.query('*OPC?')
+                try:
+                    DAC.write_binary_values(f':SOURce{Porta}:TRACe:DATA:DAC16 BIN,CONTinue,', pontos,datatype='h')
+                    DAC.query('*OPC?')
+                except:
+                    print(f'{i/len(simboloscortados)*100}%')
+                    DAC.query('*OPC?')
 
     DAC.write(f':SOURce{Porta}:FUNCtion:SEQuence:LIST:SRATe {fs}')
     DAC.write(f':SOURce{Porta}:FUNCtion:SEQuence:LIST:FILTer {filtro}')
@@ -73,7 +109,51 @@ def Onda_Dac(DAC,Porta,fs,V_High,V_Low,pontos,filtro):
     DAC.write(f':SOURce{Porta}:VOLTage:LOW {V_Low}')
     DAC.write(f':OUTPut{Porta}:STATe ON')
 
-def ConfigurarScope(scope,tempo,canais,vDivisao,impedancia,trigger,offset):
+def Onda_Dac_Keysight(DAC,Porta,fs,V_High,V_Low,pontos,Nome_Onda,filtro):
+    ##############################################################
+    # Função para gerar a forma de onda arbitraria no DAC Keysight Trueform 33600A  
+
+    # Parametros:
+    # DAC (Objeto do pyvisa relacionado ao DAC)
+    # Porta (int 1 ou 2): Porta que será enviada a sequencia arbitraria
+    # fs (float): Taxa de amostragem do DAC
+    # V_High (float ou int): Amplitude maxima do sinal
+    # V_Low  (float ou int): Amplitude minima do sinal
+    # pontos (array numpy): Sequencia de pontos a ser carregada no DAC
+    # Nome_Onda (string): Nome do arquivo de onda arbitrario
+    # filtro (string: Normal, Insert, Step): Formato de pulso usada no DAC
+    ##############################################################
+
+    DAC.write(f'SOURce{Porta}:DATA:VOL:CLE')
+    DAC.write('FORMat:BORDer SWAPped')
+    DAC.write_binary_values('SOURCE{}:DATA:ARB:DAC {},'.format(Porta,Nome_Onda),pontos,datatype='h')
+    print(DAC.query('SYSTEM:ERROR?'))  
+    DAC.query('*OPC?')  
+    DAC.write('SOURCE{}:FUNC ARB'.format(Porta))
+    DAC.write('SOURCE{}:FUNC:ARB {}'.format(Porta,Nome_Onda)) 
+    DAC.write('SOURCE{}:FUNC:ARB:SRAT {}'.format(Porta,fs))
+    DAC.write(f'SOURCE{Porta}:FUNCtion:ARBitrary:FILTer {filtro}')
+    DAC.write(f'SOURCE2:VOLT {(V_High-V_Low)}')
+    DAC.write(f'SOURCE2:VOLT:OFFS {(V_High+V_Low)/2}')
+    DAC.write('OUTP{} ON'.format(Porta))
+    DAC.write('DISPLAY:FOCUS CH{}'.format(Porta))
+
+
+def ConfigurarScope(scope,tempo,canais,vDivisao,impedancia,triggerChannel,triggerAmp,offset):
+    ##############################################################
+    # Função para configurar os canais e a visualização no Osciloscopio Keysight InfiniiVision DSOX3014T
+
+    # Parametros:
+    # scope (Objeto do pyvisa relacionado ao osciloscopio)
+    # tempo (float): Intervalo de tempo na janela do osciloscopio
+    # canais (int ou lista): Numero do/dos canais a serem configurados e ativados
+    # vDvisao (int ou lista): Volts por divisão de cada canal
+    # impedancia (string: FIFTy ou ONEMeg): Impedancia de cada canal
+    # triggerChannel (int): Canal que será usado para trigger
+    # triggerAmp (int): Amplitude do trigger
+    # offset (int ou lista): Offset de cada canal
+    ##############################################################
+
     scope.write('trigger:mode edge')
     scope.write(f'timebase:range {tempo}')
     scope.write(':CHANnel1:DISPlay 0')
@@ -81,14 +161,44 @@ def ConfigurarScope(scope,tempo,canais,vDivisao,impedancia,trigger,offset):
     scope.write(':CHANnel3:DISPlay 0')
     scope.write(':CHANnel4:DISPlay 0')
     for i in range(len(canais)):
-        scope.write(f'trigger:level channel{canais[i]}, {trigger[i]}')
         scope.write(f'channel{canais[i]}:impedance {impedancia[i]}')
         scope.write(f':CHANnel{canais[i]}:OFFSet {offset[i]}')
         scope.write(f'CHANnel{canais[i]}:SCALe {vDivisao[i]}')
         scope.write(f':CHANnel{canais[i]}:DISPlay 1;*OPC?')
+    scope.write(f'trigger:level channel{triggerChannel}, {triggerAmp}')
     
+def ConfigFFT(scope,canal,escaladB,fstart,fstop):
+    ##############################################################
+    # Função para ativar o modo FFT de um canal no Osciloscopio Keysight InfiniiVision DSOX3014T
+
+    # Parametros:
+    # scope (Objeto do pyvisa relacionado ao osciloscopio)
+    # canal (int): Numero do canal que fará a fft
+    # escaladB (float): Escala vertical da FFT
+    # fstart (float): Frequencia inicial da FFT
+    # fstop (float): Frequencia final da FFT
+    ##############################################################
+
+    scope.write(f':FFT:SOURce{canal}')
+    scope.write(f':FFT:SCALe {escaladB}')
+    scope.write(f':FFT:FREQuency:STARt {fstart}')
+    scope.write(f':FFT:FREQuency:STOP {fstop}')
+    scope.write(':FFT:DMODe AVERage')
+    scope.write(':FFT:DISPlay 1')
 
 def AdquirirOnda(scope,canal):
+    ##############################################################
+    # Função para retornar a forma de onda de um canal 
+
+    # Parametros:
+    # scope (Objeto do pyvisa relacionado ao osciloscopio)
+    # canal (int ou string: FFT): Canal para obter a forma de onda
+
+    # Outputs:
+    # t (array numpy): array representando o tempo dos pontos do sinal ou frequencia caso escolha FFT
+    # y (array numpy): array representando a amplitude dos pontos do sinal
+    ##############################################################
+
     if canal == 'FFT':
         scope.write(':WAVeform:SOURce FFT')
     else:
@@ -110,15 +220,22 @@ def AdquirirOnda(scope,canal):
     y = (np.array(dados) - yReferencia)*Δy  + yIncial
 
     return t,y
-def ConfigFFT(scope,canal,escaladB,fstart,fstop):
-    scope.write(f':FFT:SOURce{canal}')
-    scope.write(f':FFT:SCALe {escaladB}')
-    scope.write(f':FFT:FREQuency:STARt {fstart}')
-    scope.write(f':FFT:FREQuency:STOP {fstop}')
-    scope.write(':FFT:DMODe AVERage')
-    scope.write(':FFT:DISPlay 1')
+
+def periodic_corr(x, y):
+    ##############################################################
+    # Função para calcular a correlação periodica entre dois arrays usando a FFT
+    # Usada para calcular o atraso do sinal recebido.
+    # Parametros:
+    # x,y (array numpy): Arrays para calcular a correlação
+    # Output:
+    # Array da correlação dos dois sinais, para calcular o indice do atraso, bastar usar np.argmax()
+    ##############################################################
+    
+    return (ifft(fft(x) * fft(y).conj()).real)
 
 def DemodularSinal(scope,scopeSinal,ScopeReferencia,AmplitudeReferencia,nSimbolos,SPS,simbolosTransmitidos,plot):
+    # Função Antiga para demodular o sinal do Osciloscopio
+    # NÃO USADA MAIS
     tsinalizacao,ysinalizacao = AdquirirOnda(scope,ScopeReferencia)
     t,y = AdquirirOnda(scope,scopeSinal)
     if plot==True:
