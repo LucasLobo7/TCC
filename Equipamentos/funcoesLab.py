@@ -15,7 +15,7 @@ from numpy.fft import fft, ifft
 from optic.plot import eyediagram
 plt.rcParams["figure.figsize"] = (12,6)
 
-def Gerar_Simbolos(M,nsimbolos,SPS,formatoPulso,nTaps,alpha):
+def Gerar_Simbolos(M,nsimbolos,SPS,formatoPulso,nTaps,alpha,bits=np.array([0])):
     ##############################################################
     # Função para gerar os pontos em PAM para serem enviados para o DAC
     # Os pontos ja saem escalonados entre -32767 e 32767 (short int, 2 bytes)
@@ -33,8 +33,9 @@ def Gerar_Simbolos(M,nsimbolos,SPS,formatoPulso,nTaps,alpha):
     ##############################################################
 
     # Geração de simbolos
-    bits = np.random.randint(0,2,int(nsimbolos*np.log2(M)))
-
+    if np.array_equal(bits,np.array([0])):
+        bits = np.random.randint(0,2,int(nsimbolos*np.log2(M)))
+    
     simbolos = modulateGray(bits, M, 'pam')
     simbolos = pnorm(simbolos)
 
@@ -49,6 +50,7 @@ def Gerar_Simbolos(M,nsimbolos,SPS,formatoPulso,nTaps,alpha):
     sinal = sinal - 32767
     sinal = (np.rint(sinal)).astype(int)
     return bits,sinal
+
 
 def Onda_Dac_Rigol(DAC,Porta,fs,V_High,V_Low,pontos,filtro):
     ##############################################################
@@ -264,3 +266,14 @@ def DemodularSinal(scope,scopeSinal,ScopeReferencia,AmplitudeReferencia,nSimbolo
         plt.ylabel('Valor do Simbolo')
         plt.title('Simbolos Demodulados')
     return simbolosTransmitidos,simbolosrecebidos
+
+def LMS(x,d,L,μ,Niterações):
+    x = np.append(np.zeros(L-1),x)
+    W = np.zeros(L)
+    erro = np.zeros(Niterações)
+
+    for i in range(Niterações):
+        xcortado = np.flip(x[i:L+i])
+        erro[i] = d[i] - np.sum(W*xcortado)
+        W = W + μ*erro[i]*xcortado
+    return W,erro
