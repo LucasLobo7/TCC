@@ -15,7 +15,16 @@ from numpy.fft import fft, ifft
 from optic.plot import eyediagram
 plt.rcParams["figure.figsize"] = (12,6)
 
-def Gerar_Simbolos(M,nsimbolos,SPS,formatoPulso,nTaps,alpha,bits=np.array([0])):
+def Gerar_Simbolos(Modululador,bits=np.array([0])):
+
+    M = Modululador['M']
+    nsimbolos = Modululador['nsimbolos']
+    SPS = Modululador['SPS']
+    formatoPulso = Modululador['formatoPulso']
+    nTaps = Modululador['nTaps']
+    alpha = Modululador['alpha']
+    W = Modululador['W']
+
     ##############################################################
     # Função para gerar os pontos em PAM para serem enviados para o DAC
     # Os pontos ja saem escalonados entre -32767 e 32767 (short int, 2 bytes)
@@ -43,13 +52,26 @@ def Gerar_Simbolos(M,nsimbolos,SPS,formatoPulso,nTaps,alpha,bits=np.array([0])):
     simbolosup = upsample(simbolos, SPS)
     pulso = pulseShape(formatoPulso, SPS, nTaps, alpha)
     pulso = pulso/max(abs(pulso))
+
     sinal = firFilter(pulso, simbolosup)
+    
+    if np.array_equal(W,np.array([])):
+        sinalequalizado = 0
+    else:
+        sinalequalizado = firFilter(W,sinal)
+        sinalequalizado = sinalequalizado.real
+        sinalequalizado = sinalequalizado - np.min(sinalequalizado)
+        sinalequalizado = sinalequalizado/np.max(sinalequalizado)*65534
+        sinalequalizado = sinalequalizado - 32767
+        sinalequalizado = (np.rint(sinalequalizado)).astype(int)
+
     sinal = sinal.real
     sinal = sinal - np.min(sinal)
     sinal = sinal/np.max(sinal)*65534
     sinal = sinal - 32767
     sinal = (np.rint(sinal)).astype(int)
-    return bits,sinal
+
+    return bits,sinal,sinalequalizado
 
 
 def Onda_Dac_Rigol(DAC,Porta,fs,V_High,V_Low,pontos,filtro):
@@ -111,7 +133,14 @@ def Onda_Dac_Rigol(DAC,Porta,fs,V_High,V_Low,pontos,filtro):
     DAC.write(f':SOURce{Porta}:VOLTage:LOW {V_Low}')
     DAC.write(f':OUTPut{Porta}:STATe ON')
 
-def Onda_Dac_Keysight(DAC,Porta,fs,V_High,V_Low,pontos,Nome_Onda,filtro):
+def Onda_Dac_Keysight(Dac,Modulador,pontos,Nome_Onda):
+    DAC = Dac['dispositivo']
+    Porta =Dac['Porta']
+    fs = Dac['fs']
+    V_High = Dac['V_High']
+    V_Low = Dac['V_Low']
+    filtro = Dac['filtro']
+    SPS = Modulador['SPS']
     ##############################################################
     # Função para gerar a forma de onda arbitraria no DAC Keysight Trueform 33600A  
 
@@ -133,7 +162,7 @@ def Onda_Dac_Keysight(DAC,Porta,fs,V_High,V_Low,pontos,Nome_Onda,filtro):
     DAC.query('*OPC?')  
     DAC.write('SOURCE{}:FUNC ARB'.format(Porta))
     DAC.write('SOURCE{}:FUNC:ARB {}'.format(Porta,Nome_Onda)) 
-    DAC.write('SOURCE{}:FUNC:ARB:SRAT {}'.format(Porta,fs))
+    DAC.write('SOURCE{}:FUNC:ARB:SRAT {}'.format(Porta,fs*SPS))
     DAC.write(f'SOURCE{Porta}:FUNCtion:ARBitrary:FILTer {filtro}')
     DAC.write(f'SOURCE2:VOLT {(V_High-V_Low)}')
     DAC.write(f'SOURCE2:VOLT:OFFS {(V_High+V_Low)/2}')
@@ -141,7 +170,8 @@ def Onda_Dac_Keysight(DAC,Porta,fs,V_High,V_Low,pontos,Nome_Onda,filtro):
     DAC.write('DISPLAY:FOCUS CH{}'.format(Porta))
 
 
-def ConfigurarScope(scope,tempo,canais,vDivisao,impedancia,triggerChannel,triggerAmp,offset):
+def ConfigurarScope(Scope):
+
     ##############################################################
     # Função para configurar os canais e a visualização no Osciloscopio Keysight InfiniiVision DSOX3014T
 
@@ -155,6 +185,15 @@ def ConfigurarScope(scope,tempo,canais,vDivisao,impedancia,triggerChannel,trigge
     # triggerAmp (int): Amplitude do trigger
     # offset (int ou lista): Offset de cada canal
     ##############################################################
+    
+    scope = Scope['dispositivo']
+    tempo = Scope['tempo']
+    canais = Scope['canais']
+    vDivisao =Scope['vDivisao']
+    impedancia = Scope['impedancia']
+    triggerChannel = Scope['triggerChannel']
+    triggerAmp = Scope['triggerAmp']
+    offset = Scope['offset']
 
     scope.write('trigger:mode edge')
     scope.write(f'timebase:range {tempo}')
@@ -206,7 +245,7 @@ def AdquirirOnda(scope,canal):
     else:
         scope.write(f'waveform:source channel{canal}')
     scope.write('waveform:format byte')
-    
+    scope.write(':WAVeform:POINts:MODE MAX')
     dados = scope.query_binary_values('waveform:data?', datatype='B')
     nDados = len(dados)
 
@@ -234,6 +273,23 @@ def periodic_corr(x, y):
     ##############################################################
     
     return (ifft(fft(x) * fft(y).conj()).real)
+
+def sicronizarSinais(y,x,plot=False):
+
+    if len(x) > len(y):
+        y = np.append(y,np.zeros(len(x)-len(y)))
+    if len(y) > len(x):
+        x = np.append(x,np.zeros(len(y)-len(x)))
+    corr = periodic_corr(pnorm(x-np.mean(x)), pnorm(y-np.mean(y)))
+    delay = np.argmax(corr)
+    if plot == True:
+        plt.figure()
+        plt.plot(corr/np.max(corr))
+        plt.xlabel('indice')
+        plt.ylabel('Amplitude')
+        plt.grid()
+        plt.title(f'Correlação cruzada usando FFT, atraso = {int(delay)}')
+    return np.roll(y,delay)
 
 def DemodularSinal(scope,scopeSinal,ScopeReferencia,AmplitudeReferencia,nSimbolos,SPS,simbolosTransmitidos,plot):
     # Função Antiga para demodular o sinal do Osciloscopio
@@ -277,3 +333,49 @@ def LMS(x,d,L,μ,Niterações):
         erro[i] = d[i] - np.sum(W*xcortado)
         W = W + μ*erro[i]*xcortado
     return W,erro
+
+def lms(y, x, Ntaps, μ):
+    """
+    Apply the LMS (Least Mean Squares) algorithm for equalization.
+
+    Parameters:
+        y (ndarray): The received signal.
+        x (ndarray): The reference signal.
+        Ntaps (int): The number of filter taps.
+        μ (float): The LMS step size.
+
+    Returns:
+        tuple: A tuple containing:
+            - ndarray: The equalized signal.
+            - ndarray: The final equalizer filter coefficients.
+            - ndarray: The squared error at each iteration.
+
+    """
+    # Initialize the equalizer filter coefficients
+    h = np.zeros(Ntaps)
+    L = len(h)//2 #decision delay
+
+    # Apply the LMS algorithm
+    squaredError = np.zeros(y.shape)
+    out  = np.zeros(y.shape)
+    ind = np.arange(-L,L+1)
+
+    y = np.pad(y,(L,L))
+
+    # Iterate through each sample of the signal
+    for i in range(L, len(y)-L):
+        y_vec = y[i+ind][-1::-1]
+
+        # Generate the estimated signal using the equalizer filter
+        xhat = np.dot(y_vec, h)
+
+        # Compute the error between the estimated signal and the reference signal
+        error = x[i-L] - xhat
+
+        # Update the filter coefficients using the LMS update rule
+        h += μ * y_vec * error
+
+        squaredError[i-L] = error**2
+        out[i-L] = xhat
+
+    return out, h, squaredError
