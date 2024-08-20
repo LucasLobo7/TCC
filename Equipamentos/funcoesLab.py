@@ -44,7 +44,8 @@ def Gerar_Simbolos(Modululador,bits=np.array([0])):
     # Geração de simbolos
     if np.array_equal(bits,np.array([0])):
         bits = np.random.randint(0,2,int(nsimbolos*np.log2(M)))
-    
+
+
     simbolos = modulateGray(bits, M, 'pam')
     simbolos = pnorm(simbolos)
 
@@ -71,7 +72,7 @@ def Gerar_Simbolos(Modululador,bits=np.array([0])):
     sinal = sinal - 32767
     sinal = (np.rint(sinal)).astype(int)
 
-    return bits,sinal,sinalequalizado
+    return bits,pulso,sinal,sinalequalizado
 
 
 def Onda_Dac_Rigol(DAC,Porta,fs,V_High,V_Low,pontos,filtro):
@@ -203,8 +204,8 @@ def ConfigurarScope(Scope):
     scope.write(':CHANnel4:DISPlay 0')
     for i in range(len(canais)):
         scope.write(f'channel{canais[i]}:impedance {impedancia[i]}')
-        scope.write(f':CHANnel{canais[i]}:OFFSet {offset[i]}')
         scope.write(f'CHANnel{canais[i]}:SCALe {vDivisao[i]}')
+        scope.write(f':CHANnel{canais[i]}:OFFSet {offset[i]}')
         scope.write(f':CHANnel{canais[i]}:DISPlay 1;*OPC?')
     scope.write(f'trigger:level channel{triggerChannel}, {triggerAmp}')
     
@@ -245,7 +246,7 @@ def AdquirirOnda(scope,canal):
     else:
         scope.write(f'waveform:source channel{canal}')
     scope.write('waveform:format byte')
-    scope.write(':WAVeform:POINts:MODE MAX')
+    scope.write(':WAVeform:POINts:MODE RAW')
     dados = scope.query_binary_values('waveform:data?', datatype='B')
     nDados = len(dados)
 
@@ -274,7 +275,7 @@ def periodic_corr(x, y):
     
     return (ifft(fft(x) * fft(y).conj()).real)
 
-def sicronizarSinais(y,x,plot=False):
+def sicronizarSinais(y,x,plot=False,returnTiming=False):
 
     if len(x) > len(y):
         y = np.append(y,np.zeros(len(x)-len(y)))
@@ -289,7 +290,10 @@ def sicronizarSinais(y,x,plot=False):
         plt.ylabel('Amplitude')
         plt.grid()
         plt.title(f'Correlação cruzada usando FFT, atraso = {int(delay)}')
-    return np.roll(y,delay)
+    if returnTiming:
+        return np.roll(y,delay),delay
+    else:
+        return np.roll(y,delay)
 
 def DemodularSinal(scope,scopeSinal,ScopeReferencia,AmplitudeReferencia,nSimbolos,SPS,simbolosTransmitidos,plot):
     # Função Antiga para demodular o sinal do Osciloscopio
@@ -379,3 +383,114 @@ def lms(y, x, Ntaps, μ):
         out[i-L] = xhat
 
     return out, h, squaredError
+
+def recepcao(transmitido,recebido,fsScope,Modulador,Dac,ClockRecovery,plot=False):
+    paramCLKREC = parameters()
+    paramCLKREC.isNyquist = True
+    paramCLKREC.returnTiming = True
+    paramCLKREC.ki = ClockRecovery['Ki']
+    paramCLKREC.kp = ClockRecovery['Kp']
+    #paramCLKREC.maxPPM = 1
+
+    transmitido = pnorm(transmitido-np.mean(transmitido))
+    recebido = pnorm(recebido-np.mean(recebido))
+
+    pulso = pulseShape(Modulador['formatoPulso'], (fsScope/Dac['fs']), Modulador['nTaps'], Modulador['alpha'])
+    pulso = pulso/max(abs(pulso))
+    filtrocasado = firFilter(pulso,recebido)
+    filtrocasado = pnorm(filtrocasado-np.mean(filtrocasado))
+    filtrocasado, ted_values = gardnerClockRecovery(filtrocasado, paramCLKREC)
+    filtrocasado = pnorm(filtrocasado-np.mean(filtrocasado))
+    filtrocasado = filtrocasado[:,0]
+
+    recebidodecimado = clockSamplingInterp(filtrocasado.reshape(-1,1),Fs_in=(fsScope/Dac['fs']),Fs_out=1,jitter_rms=0)[:,0]
+    recebidodecimado = pnorm(recebidodecimado-np.mean(recebidodecimado))
+    recebidosicronizado = recebidodecimado
+
+    simbolos = modulateGray(bits,4,'pam')
+    simbolos = pnorm(simbolos-np.mean(simbolos))
+
+    simbolos,delay = sicronizarSinais(simbolos,(recebidosicronizado),plot=plot,returnTiming=True)
+    #simbolos = simbolos[0:len(simbolos)]
+    simbolos = pnorm(simbolos-np.mean(simbolos))
+
+    simbolos = simbolos[500000:]
+    recebidosicronizado = recebidosicronizado[500000:]
+
+
+    diferenca = simbolos - recebidosicronizado
+    ber,ser,SNRdB = (fastBERcalc(pnorm(recebidosicronizado), pnorm(simbolos), 4, 'pam'))
+    erros = np.argwhere(np.abs(diferenca)>0.4470)
+
+    print(f'BER: {ber[0]}')
+    print(f'SER: {ser[0]}')
+    print(f'Numero de error totais: {len(erros)}')
+    print(f'SNR: {SNRdB[0]} dB')
+
+    from scipy.special import erfc
+
+    def Q(x):
+        return 0.5*erfc(x/np.sqrt(2))
+    SNR = 10**(SNRdB[0]/10)
+    print(f'Numero de erros teoricos para essa SNR: {2*(4-1)/4*Q(np.sqrt((6*SNR)/(4**2-1)))}')
+
+    # print(len(recebidosicronizado))
+    # print(len(simbolos))
+    # # recebidosicronizado = recebidosicronizado[1:-1]
+    # # simbolos = simbolos[1:-1]
+
+    if plot==True:
+        plt.figure()
+        eyediagram(filtrocasado[1000000:],len(filtrocasado[1000000:]),(fsScope/Dac['fs']),ptype='fancy')
+        plt.figure()
+        plt.plot(ted_values)
+        plt.xlabel('Indice')
+        plt.ylabel('Correção do clock')
+        plt.title('Clock corrigido pelo Gardner Timing Recovery')
+        plt.grid()
+        plt.figure()
+        plt.plot((simbolos)[0:0+20],'o-',label='Simbolos transmitidos')
+        plt.plot((recebidosicronizado)[0:0+20],'o-',label='Simbolos recebidos')
+        plt.title('Comparação dos simbolos')
+        plt.xlabel('indices')
+        plt.ylabel('Amplitude')
+        plt.grid()
+        plt.legend()
+
+        plt.figure()
+        plt.plot(diferenca,label='erro')
+        plt.axhline(-0.4470,linestyle='--',color='k',label='Limite para decisão errada')
+        plt.axhline(0.4470,linestyle='--',color='k')
+        plt.title('Erro entre os simbolos transmitidos e recebidos')
+        plt.xlabel('indices')
+        plt.ylabel('Amplitude')
+        plt.ylim(-0.5,0.5)
+        plt.grid()
+        plt.legend()
+
+        plt.figure()
+        plt.hist(diferenca,bins=500)
+        plt.axvline(-0.4470,linestyle='--',color='k',label='Limite para decisão errada')
+        plt.axvline(0.4470,linestyle='--',color='k')
+        plt.title('Distribuição do erro entre os simbolos transmitidos e recebidos')
+        plt.xlim(-0.5,0.5)
+        plt.xlabel('valor')
+        plt.ylabel('numero de ocorrencias')
+        plt.grid()
+        plt.legend()
+
+        plt.figure()
+        plt.title('Densidade Espectral de Potencia dos Sinais')
+        plt.psd(recebido,Fs=fsScope, NFFT = 1024, sides='twosided', label = 'Recebido')
+        plt.psd(transmitido,Fs=Dac['fs']*Modulador['SPS'], NFFT = 1024, sides='twosided', label = 'Transmitido')
+        plt.xlim(-0.5e9,0.5e9)
+        plt.legend()
+
+        # plt.figure()
+        # plt.plot(erros,'o-')
+        # plt.title(f'Indice dos erros: atraso da sicronização = {delay}')
+        # plt.grid()
+        # plt.xlabel('Indice do erro')
+        # plt.ylabel('Posição do erro')
+        # plt.xlim(0,len(erros)-1)
+    return ber[0],ser[0],len(erros),SNRdB[0]
