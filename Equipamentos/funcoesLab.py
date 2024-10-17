@@ -9,11 +9,14 @@ from tqdm.notebook import tqdm, trange
 from scipy.special import erfc
 import scipy as sp
 from optic.comm.modulation import modulateGray, demodulateGray, GrayMapping
-from optic.dsp.core import firFilter, pulseShape, lowPassFIR, pnorm, upsample
+from optic.dsp.core import firFilter, pulseShape, lowPassFIR, pnorm, upsample, decimate,clockSamplingInterp,symbolSync
 from optic.comm.metrics import signal_power,fastBERcalc
-from numpy.fft import fft, ifft
+from optic.dsp.equalization import *
 from optic.plot import eyediagram
-plt.rcParams["figure.figsize"] = (12,6)
+from optic.dsp.clockRecovery import gardnerClockRecovery
+from optic.utils import parameters
+
+
 
 def Gerar_Simbolos(Modululador,bits=np.array([0])):
 
@@ -67,6 +70,7 @@ def Gerar_Simbolos(Modululador,bits=np.array([0])):
         sinalequalizado = (np.rint(sinalequalizado)).astype(int)
 
     sinal = sinal.real
+    sinal = pnorm(sinal - np.mean(sinal))
     sinal = sinal - np.min(sinal)
     sinal = sinal/np.max(sinal)*65534
     sinal = sinal - 32767
@@ -138,6 +142,10 @@ def Onda_Dac_Keysight(Dac,Modulador,pontos,Nome_Onda):
     DAC = Dac['dispositivo']
     Porta =Dac['Porta']
     fs = Dac['fs']
+    off_amp = Dac['off_amp']
+    Amplitude = Dac['Amplitude']
+    Offset = Dac['Off-set']
+
     V_High = Dac['V_High']
     V_Low = Dac['V_Low']
     filtro = Dac['filtro']
@@ -165,8 +173,12 @@ def Onda_Dac_Keysight(Dac,Modulador,pontos,Nome_Onda):
     DAC.write('SOURCE{}:FUNC:ARB {}'.format(Porta,Nome_Onda)) 
     DAC.write('SOURCE{}:FUNC:ARB:SRAT {}'.format(Porta,fs*SPS))
     DAC.write(f'SOURCE{Porta}:FUNCtion:ARBitrary:FILTer {filtro}')
-    DAC.write(f'SOURCE2:VOLT {(V_High-V_Low)}')
-    DAC.write(f'SOURCE2:VOLT:OFFS {(V_High+V_Low)/2}')
+    if off_amp == True:
+        DAC.write(f'SOURCE{Porta}:VOLT:OFFS {Offset}')
+        DAC.write(f'SOURCE{Porta}:VOLT {Amplitude}')
+    else:
+        DAC.write(f'SOURCE{Porta}:VOLT:OFFS {(V_High+V_Low)/2}')
+        DAC.write(f'SOURCE{Porta}:VOLT {(V_High-V_Low)}')
     DAC.write('OUTP{} ON'.format(Porta))
     DAC.write('DISPLAY:FOCUS CH{}'.format(Porta))
 
@@ -384,7 +396,9 @@ def lms(y, x, Ntaps, μ):
 
     return out, h, squaredError
 
-def recepcao(transmitido,recebido,fsScope,Modulador,Dac,ClockRecovery,plot=False):
+
+def recepcao(bits,transmitido,recebido,fsScope,Modulador,Dac,ClockRecovery,plot=False):
+
     paramCLKREC = parameters()
     paramCLKREC.isNyquist = True
     paramCLKREC.returnTiming = True
@@ -399,27 +413,27 @@ def recepcao(transmitido,recebido,fsScope,Modulador,Dac,ClockRecovery,plot=False
     pulso = pulso/max(abs(pulso))
     filtrocasado = firFilter(pulso,recebido)
     filtrocasado = pnorm(filtrocasado-np.mean(filtrocasado))
+    olho = filtrocasado
+    if ((fsScope/Dac['fs']))!=2.0:
+        print('oi') 
+        filtrocasado = clockSamplingInterp(filtrocasado.reshape(-1,1),Fs_in=(fsScope/Dac['fs']),Fs_out=2,jitter_rms=0)[:,0]
     filtrocasado, ted_values = gardnerClockRecovery(filtrocasado, paramCLKREC)
     filtrocasado = pnorm(filtrocasado-np.mean(filtrocasado))
     filtrocasado = filtrocasado[:,0]
-
-    recebidodecimado = clockSamplingInterp(filtrocasado.reshape(-1,1),Fs_in=(fsScope/Dac['fs']),Fs_out=1,jitter_rms=0)[:,0]
+    recebidodecimado = clockSamplingInterp(filtrocasado.reshape(-1,1),Fs_in=2,Fs_out=1,jitter_rms=0)[:,0]
     recebidodecimado = pnorm(recebidodecimado-np.mean(recebidodecimado))
     recebidosicronizado = recebidodecimado
 
-    simbolos = modulateGray(bits,4,'pam')
+    simbolos = modulateGray(bits,Modulador['M'],'pam')
     simbolos = pnorm(simbolos-np.mean(simbolos))
 
     simbolos,delay = sicronizarSinais(simbolos,(recebidosicronizado),plot=plot,returnTiming=True)
     #simbolos = simbolos[0:len(simbolos)]
     simbolos = pnorm(simbolos-np.mean(simbolos))
-
-    simbolos = simbolos[500000:]
-    recebidosicronizado = recebidosicronizado[500000:]
-
-
+    simbolos = simbolos[ClockRecovery['Descarte']:]
+    recebidosicronizado = recebidosicronizado[ClockRecovery['Descarte']:]
     diferenca = simbolos - recebidosicronizado
-    ber,ser,SNRdB = (fastBERcalc(pnorm(recebidosicronizado), pnorm(simbolos), 4, 'pam'))
+    ber,ser,SNRdB = (fastBERcalc(pnorm(recebidosicronizado), pnorm(simbolos), Modulador['M'], 'pam'))
     erros = np.argwhere(np.abs(diferenca)>0.4470)
 
     print(f'BER: {ber[0]}')
@@ -441,13 +455,15 @@ def recepcao(transmitido,recebido,fsScope,Modulador,Dac,ClockRecovery,plot=False
 
     if plot==True:
         plt.figure()
-        eyediagram(filtrocasado[1000000:],len(filtrocasado[1000000:]),(fsScope/Dac['fs']),ptype='fancy')
+        eyediagram(olho,len(olho),(fsScope/Dac['fs']),ptype='fancy')
+        
         plt.figure()
         plt.plot(ted_values)
         plt.xlabel('Indice')
         plt.ylabel('Correção do clock')
         plt.title('Clock corrigido pelo Gardner Timing Recovery')
         plt.grid()
+        
         plt.figure()
         plt.plot((simbolos)[0:0+20],'o-',label='Simbolos transmitidos')
         plt.plot((recebidosicronizado)[0:0+20],'o-',label='Simbolos recebidos')
@@ -464,7 +480,6 @@ def recepcao(transmitido,recebido,fsScope,Modulador,Dac,ClockRecovery,plot=False
         plt.title('Erro entre os simbolos transmitidos e recebidos')
         plt.xlabel('indices')
         plt.ylabel('Amplitude')
-        plt.ylim(-0.5,0.5)
         plt.grid()
         plt.legend()
 
@@ -473,7 +488,6 @@ def recepcao(transmitido,recebido,fsScope,Modulador,Dac,ClockRecovery,plot=False
         plt.axvline(-0.4470,linestyle='--',color='k',label='Limite para decisão errada')
         plt.axvline(0.4470,linestyle='--',color='k')
         plt.title('Distribuição do erro entre os simbolos transmitidos e recebidos')
-        plt.xlim(-0.5,0.5)
         plt.xlabel('valor')
         plt.ylabel('numero de ocorrencias')
         plt.grid()
@@ -483,7 +497,6 @@ def recepcao(transmitido,recebido,fsScope,Modulador,Dac,ClockRecovery,plot=False
         plt.title('Densidade Espectral de Potencia dos Sinais')
         plt.psd(recebido,Fs=fsScope, NFFT = 1024, sides='twosided', label = 'Recebido')
         plt.psd(transmitido,Fs=Dac['fs']*Modulador['SPS'], NFFT = 1024, sides='twosided', label = 'Transmitido')
-        plt.xlim(-0.5e9,0.5e9)
         plt.legend()
 
         # plt.figure()
@@ -493,4 +506,5 @@ def recepcao(transmitido,recebido,fsScope,Modulador,Dac,ClockRecovery,plot=False
         # plt.xlabel('Indice do erro')
         # plt.ylabel('Posição do erro')
         # plt.xlim(0,len(erros)-1)
+    #return 1,1,len(erros),1
     return ber[0],ser[0],len(erros),SNRdB[0]
